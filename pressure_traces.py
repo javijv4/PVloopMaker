@@ -87,24 +87,54 @@ valve_events = {'avo': events[0], 'avc': events[2], 'sys': events[1],
 np.save('reference_pressure_trace/normalized_aorta_pressure.npy', save)
 np.savez('reference_pressure_trace/aorta_valve_times.npz', **valve_events)
 
+# Load lv pressure traces
+time_pres, lv_pres = np.load('reference_pressure_trace/normalized_human_pressure_og.npy').T
+normalized_valve_times = dict(np.load(f'reference_pressure_trace/normalized_valve_times_og.npz'))
 
+value = 0.06
+normalized_valve_times['avo'] -= 0.025
+normalized_valve_times['pvo'] -= 0.025
+normalized_valve_times['avc'] -= value
+normalized_valve_times['mvo'] -= value
+normalized_valve_times['pvc'] -= value
+normalized_valve_times['tvo'] -= value
 
-# Plot left side
-plt.figure(figsize=(10, 6))
-plt.plot(time, p_lv, label='Left Ventricle Pressure')
-plt.plot(time, p_la, label='Left Atrium Pressure')
-plt.plot(time, p_aorta, label='Aorta Pressure')
-plt.scatter(la_left_events, np.interp(la_left_events, time, p_aorta), color='red', marker='x', label='Valve Events')
+func_pres = interp1d(time_pres, lv_pres, kind='linear')
+print(func_pres(normalized_valve_times['avo'])*120)
+
+np.save('reference_pressure_trace/normalized_human_pressure.npy', np.column_stack((time_pres, lv_pres)))
+np.savez('reference_pressure_trace/normalized_valve_times.npz', **normalized_valve_times)
+
+# Plot the pressure trace and the normalized valve times
+plt.figure(figsize=(5, 3))
+plt.plot(time_pres, lv_pres, label='Normalized LV Pressure',)
+for key, value in normalized_valve_times.items():
+    plt.axvline(x=value, linestyle='--', label=f'{key} event')
 plt.xlabel('Time (s)')
 plt.ylabel('Pressure (mmHg)')
-plt.title('Left Side Pressure Traces')
-plt.legend()
+plt.title('Normalized LV Pressure Trace with Valve Times')
+# plt.legend(frameon=False)
 plt.grid(True)
+plt.savefig('normalized_lv_pressure_trace.png', bbox_inches='tight', dpi=180)
 plt.show()
 
-# Plot saved trace
-plt.figure(figsize=(10, 6))
-plt.plot(time, save_trace, label='Left Atrium Pressure')
-plt.scatter(events, np.interp(events, time, save_trace), color='red', marker='x', label='Valve Events')
-plt.xlabel('Time (s)')
-plt.ylabel('Pressure (mmHg)')
+# # Plot left side
+# plt.figure(figsize=(5, 3))
+# plt.plot(time, p_lv, label='Left Ventricle Pressure')
+# plt.plot(time, p_la, label='Left Atrium Pressure')
+# plt.plot(time, p_aorta, label='Aorta Pressure')
+# # plt.scatter(la_left_events, np.interp(la_left_events, time, p_aorta), color='red', marker='x', label='Valve Events')
+# plt.xlabel('Time (s)')
+# plt.ylabel('Pressure (mmHg)')
+# plt.title('Left Side Pressure Traces')
+# plt.legend(frameon=False)
+# plt.grid(True)
+# plt.savefig('0d_traces.png', bbox_inches='tight', dpi=180)
+# plt.show()
+
+# # Plot saved trace
+# plt.figure(figsize=(10, 6))
+# plt.plot(time, save_trace, label='Left Atrium Pressure')
+# plt.scatter(events, np.interp(events, time, save_trace), color='red', marker='x', label='Valve Events')
+# plt.xlabel('Time (s)')
+# plt.ylabel('Pressure (mmHg)')

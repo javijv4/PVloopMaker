@@ -260,7 +260,7 @@ def get_pv_functions(time, trace, interp='pchip'):
 
     # Smooth traces
     if interp == 'linear':
-        trace_func = interp1d(time_ext, trace_ext)
+        trace_func = interp1d(time_ext, trace_ext, fill_value='extrapolate')
     elif interp == 'pchip':
         trace_func = PchipInterpolator(time_ext, trace_ext)
     else:
@@ -532,6 +532,7 @@ def plot_pv_loop_traces(lv_vol_func, lv_pres_func, lv_valve_times,
     ax1.set_xlabel('Volume (ml)')
     ax1.set_ylabel('Pressure (mmHg)')
     ax1.set_title('Pressure vs Volume')
+    ax1.grid(True)
 
     # Pressure subplot
     ax2.plot(time_pv, lv_pres_pv * 7.50062, 'r-', label='LV Pressure')
@@ -551,6 +552,7 @@ def plot_pv_loop_traces(lv_vol_func, lv_pres_func, lv_valve_times,
     ax2.set_xlabel('Time (s)')
     ax2.set_ylabel('Pressure (mmHg)')
     ax2.set_title('Pressure over Time')
+    ax2.grid(True)
 
     # Volume subplot
     ax4.plot(time_pv, lv_vol_pv / 1000, 'r-', label='LV Volume')
@@ -574,6 +576,7 @@ def plot_pv_loop_traces(lv_vol_func, lv_pres_func, lv_valve_times,
     ax4.set_xlabel('Time (s)')
     ax4.set_ylabel('Volume (ml)')
     ax4.set_title('Volume over Time')
+    ax4.grid(True)
 
     # Remove the unused subplot and use it for the legend
     fig.delaxes(ax3)

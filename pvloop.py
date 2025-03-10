@@ -66,6 +66,9 @@ else:
     time_vol, lv_vol, Tcycle_vol = pvf.load_volume_traces(lv_vol_path, use_rv=use_rv)
     Tcycle_vol = 1.0
 
+lv_vol_func_lin = pvf.get_pv_functions(time_vol, lv_vol, interp='linear')
+rv_vol_func_lin = pvf.get_pv_functions(time_vol, rv_vol, interp='linear')
+
 # Load pressure traces
 if use_ref_pres_trace:
     if use_rv:
@@ -111,21 +114,21 @@ if use_ref_pres_trace:
 
 #%% Get PV functions
 lv_vol_func = pvf.get_pv_functions(time_vol_lv, lv_vol, interp='pchip')
-lv_vol_func_lin = pvf.get_pv_functions(time_vol_lv, lv_vol, interp='linear')
 lv_pres_func = pvf.get_pv_functions(time_pres, lv_pres, interp='linear')
 if use_rv:
     rv_vol_func = pvf.get_pv_functions(time_vol_rv, rv_vol, interp='pchip')
-    rv_vol_func_lin = pvf.get_pv_functions(time_vol_rv, rv_vol, interp='linear')
     rv_pres_func = pvf.get_pv_functions(time_pres, rv_pres, interp='linear')
         
 
 #%% PV loop shift
-vol_shift = -0.08
+vol_shift = -0.12  
 
 # Update function
 lv_vol_func = pvf.shift_vol_func(lv_vol_func, vol_shift)
+lv_vol_func_lin = pvf.shift_vol_func(lv_vol_func_lin, vol_shift)
 if use_rv:
     rv_vol_func = pvf.shift_vol_func(rv_vol_func, vol_shift)
+    rv_vol_func_lin = pvf.shift_vol_func(rv_vol_func_lin, vol_shift)
 
 
 #%% Shift to ED
@@ -182,7 +185,7 @@ chio.write_dfile(f'{out_path}/aorta_pressure.INIT', np.array([time_pv, aorta_pre
 #%% Plots
 pvf.plot_pv_loop_traces(lv_vol_func, lv_pres_func, lv_valve_times, 
                         rv_vol_func=rv_vol_func, rv_pres_func=rv_pres_func, rv_valve_times=rv_valve_times, 
-                        lv_vol_func_lin=None, rv_func_lin=None,
+                        lv_vol_func_lin=lv_vol_func_lin, rv_func_lin=rv_vol_func_lin,
                         lv_vol_passive=lv_vol_passive, lv_pres_passive=lv_pres_passive, 
                         rv_vol_passive=rv_vol_passive, rv_pres_passive=rv_pres_passive,
                         la_pres_func=la_pres_func, ra_pres_func=ra_pres_func,
