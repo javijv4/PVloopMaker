@@ -65,8 +65,8 @@ events = la_left_events - la_left_events[0]
 events = np.sort(events)
 valve_events = {'mvc': events[0], 'tvc': events[0], 'sys': events[1], 
                 'mvo': events[2], 'tvo': events[2], 'dias': events[3], 'tcycle': 1.0}
-np.save('reference_pressure_trace/normalized_atrial_pressure.npy', save)
-np.savez('reference_pressure_trace/atrial_valve_times.npz', **valve_events)
+np.save('russell_pressure_trace/normalized_atrial_pressure.npy', save)
+np.savez('russell_pressure_trace/atrial_valve_times.npz', **valve_events)
 
 #%% atrial activation
 ted=0.14
@@ -105,39 +105,39 @@ events = aorta_left_events - la_left_events[0] -.002
 events = np.sort(events)
 valve_events = {'avo': events[0], 'avc': events[2], 'sys': events[1], 
                 'pvo': events[2], 'pvc': events[2], 'tcycle': 1.0}
-np.save('reference_pressure_trace/normalized_aorta_pressure.npy', save)
-np.savez('reference_pressure_trace/aorta_valve_times.npz', **valve_events)
+np.save('russell_pressure_trace/normalized_aorta_pressure.npy', save)
+np.savez('russell_pressure_trace/aorta_valve_times.npz', **valve_events)
 
 # Load lv pressure traces
-time_pres, lv_pres = np.load('reference_pressure_trace/normalized_human_pressure_og.npy').T
-normalized_valve_times = dict(np.load(f'reference_pressure_trace/normalized_valve_times_og.npz'))
+time_pres, lv_pres = np.load('russell_pressure_trace/normalized_human_pressure_og.npy').T
+normalized_valve_times = dict(np.load(f'russell_pressure_trace/normalized_valve_times_og.npz'))
 
 value = 0.06
 normalized_valve_times['avo'] -= 0.025
 normalized_valve_times['pvo'] -= 0.025
 normalized_valve_times['avc'] -= value
-normalized_valve_times['mvo'] -= value
 normalized_valve_times['pvc'] -= value
-normalized_valve_times['tvo'] -= value
+normalized_valve_times['mvo'] -= 0
+normalized_valve_times['tvo'] -= 0
 
 func_pres = interp1d(time_pres, lv_pres, kind='linear')
 print(func_pres(normalized_valve_times['avo'])*120)
 
-np.save('reference_pressure_trace/normalized_human_pressure.npy', np.column_stack((time_pres, lv_pres)))
-np.savez('reference_pressure_trace/normalized_valve_times.npz', **normalized_valve_times)
+np.save('russell_pressure_trace/normalized_human_pressure.npy', np.column_stack((time_pres, lv_pres)))
+np.savez('russell_pressure_trace/normalized_valve_times.npz', **normalized_valve_times)
 
-# # Plot the pressure trace and the normalized valve times
-# plt.figure(figsize=(5, 3))
-# plt.plot(time_pres, lv_pres, label='Normalized LV Pressure',)
-# for key, value in normalized_valve_times.items():
-#     plt.axvline(x=value, linestyle='--', label=f'{key} event')
-# plt.xlabel('Time (s)')
-# plt.ylabel('Pressure (mmHg)')
-# plt.title('Normalized LV Pressure Trace with Valve Times')
-# # plt.legend(frameon=False)
-# plt.grid(True)
-# plt.savefig('normalized_lv_pressure_trace.png', bbox_inches='tight', dpi=180)
-# plt.show()
+# Plot the pressure trace and the normalized valve times
+plt.figure(figsize=(5, 3))
+plt.plot(time_pres, lv_pres, label='Normalized LV Pressure',)
+for key, value in normalized_valve_times.items():
+    plt.axvline(x=value, linestyle='--', label=f'{key} event')
+plt.xlabel('Time (s)')
+plt.ylabel('Pressure (mmHg)')
+plt.title('Normalized LV Pressure Trace with Valve Times')
+# plt.legend(frameon=False)
+plt.grid(True)
+plt.savefig('normalized_lv_pressure_trace.png', bbox_inches='tight', dpi=180)
+plt.show()
 
 # Plot left side
 plt.figure(figsize=(5, 3))
