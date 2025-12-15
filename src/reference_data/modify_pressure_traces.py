@@ -14,6 +14,8 @@ from scipy.interpolate import interp1d
 
 import cheartio as chio
 
+import pvfunctions as pvf
+
 def find_traces_intersection(trace1, trace2):
     if np.max(trace1) < np.max(trace2):
         p_diff = trace2 - trace1
@@ -119,8 +121,20 @@ normalized_valve_times['avc'] -= value
 normalized_valve_times['pvc'] -= value
 normalized_valve_times['mvo'] -= 0
 normalized_valve_times['tvo'] -= 0
+normalized_valve_times['ldias'] = 0.82
+normalized_valve_times['rdias'] = 0.82
 
-func_pres = interp1d(time_pres, lv_pres, kind='linear')
+shift = 0.04
+func_pres = pvf.get_pv_functions(time_pres, lv_pres, interp='linear')
+func_pres = pvf.shift_vol_func(func_pres, shift)
+lv_pres = func_pres(time_pres)
+lv_pres = lv_pres/np.max(lv_pres)
+
+normalized_valve_times = {key: value + shift for key, value in normalized_valve_times.items()}
+normalized_valve_times['mvc'] = 0
+normalized_valve_times['tvc'] = 0
+normalized_valve_times['tcycle'] = 1.0
+
 print(func_pres(normalized_valve_times['avo'])*120)
 
 np.save('russell_pressure_trace/normalized_human_pressure.npy', np.column_stack((time_pres, lv_pres)))
@@ -128,7 +142,7 @@ np.savez('russell_pressure_trace/normalized_valve_times.npz', **normalized_valve
 
 # Plot the pressure trace and the normalized valve times
 plt.figure(figsize=(5, 3))
-plt.plot(time_pres, lv_pres, label='Normalized LV Pressure',)
+plt.plot(time_pres, func_pres(time_pres), label='Normalized LV Pressure',)
 for key, value in normalized_valve_times.items():
     plt.axvline(x=value, linestyle='--', label=f'{key} event')
 plt.xlabel('Time (s)')

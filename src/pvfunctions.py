@@ -189,6 +189,36 @@ def load_aorta_pressure_trace(aorta_pres_path=None, use_ref_pres_aorta_trace=Tru
         Tcycle_pres = time_aorta_pres[-1]
         time_aorta_pres, aorta_pres = check_traces(time_aorta_pres, aorta_pres)
         return time_aorta_pres, aorta_pres, Tcycle_pres
+    
+def find_EA_peaks(flow_velocity):
+    from scipy.signal import find_peaks
+    flow_velocity_aux = np.append(flow_velocity[-1], flow_velocity)  # To avoid edge effects
+    flow_velocity_aux = np.append(flow_velocity_aux, flow_velocity[0])
+    zero_crossings = np.where(np.diff(np.sign(flow_velocity_aux)))[0]
+    min_flow_idx = np.argmin(flow_velocity)
+    zero_crossings = zero_crossings[zero_crossings > min_flow_idx]
+    dia_start = zero_crossings[0]
+
+    peaks = []
+    prominence = 5  # Initial prominence threshold
+    while len(peaks) < 2:
+        peaks, props = find_peaks(flow_velocity_aux[dia_start:], prominence=prominence)
+        prominence = prominence * 0.9  # Decrease prominence threshold if not enough peaks found
+
+    peaks = peaks + dia_start - 1  # Adjust indices to original array
+    peak_values = flow_velocity[peaks]
+    largest_indices = np.argsort(peak_values)[-2:]
+    order = np.argsort(largest_indices)
+    lbE = props['left_bases'][largest_indices[order[0]]] + dia_start - 1
+    lbA = props['left_bases'][largest_indices[order[1]]] + dia_start - 1
+    largest_peaks = peaks[largest_indices][order]
+    largest_peak_values = peak_values[largest_indices][order]
+    Epeak, Apeak = largest_peaks
+    Evalue = largest_peak_values[0]
+    Avalue = largest_peak_values[1]
+    # print("Peak E and A velocities (cm/s):", largest_peak_values)
+    # print("Peak times (s):", largest_peaks * timestep)
+    return Epeak, Apeak, lbE, lbA
 
 
 def add_iv_datapoints(time, trace, iv_dur_norm, max_or_min):
@@ -271,13 +301,13 @@ def rescale_pressure_magnitude(pressure, ed_pressure, es_pressure):
     return pressure
 
 
-def rescale_pressure_time(normalized_time, normalized_pressure, valve_times, normalized_valve_times):
-    if 'avc' in valve_times:    # LV
-        events = ['mvc', 'avo', 'avc', 'mvo', 'tcycle']
-    elif 'pvc' in valve_times:
-        events = ['tvc', 'pvo', 'pvc', 'tvo', 'tcycle']
+def rescale_pressure_time(normalized_time, normalized_pressure, valve_times, normalized_valve_times, side='lv'):
+    if side == 'lv':    # LV
+        events = ['mvc', 'avo', 'avc', 'mvo', 'ldias', 'tcycle']
+    elif side == 'rv':
+        events = ['tvc', 'pvo', 'pvc', 'tvo', 'rdias', 'tcycle']
     else:
-        raise ValueError('Failed to find valve events')
+        raise ValueError('Invalid side. Must be "lv" or "rv".')
         
     chamber_pressure = []
     pressure_time = []
@@ -299,10 +329,10 @@ def rescale_pressure_time(normalized_time, normalized_pressure, valve_times, nor
     return chamber_pressure, pressure_time
 
 
-def rescale_normalized_pressure_trace(norm_pres_time, norm_pres, valve_times, normalized_valve_times, edp, sysp):
+def rescale_normalized_pressure_trace(norm_pres_time, norm_pres, valve_times, normalized_valve_times, edp, sysp, side='lv'):
     # Need to rescale
     pres_mag = rescale_pressure_magnitude(norm_pres, edp, sysp)
-    pres_time, time_pres = rescale_pressure_time(norm_pres_time, pres_mag, valve_times, normalized_valve_times)
+    pres_time, time_pres = rescale_pressure_time(norm_pres_time, pres_mag, valve_times, normalized_valve_times, side)
 
     return pres_time, time_pres
 
@@ -322,7 +352,7 @@ def repeat_time(time):
     Returns:
     numpy.ndarray: A concatenated array consisting of the original time array shifted by its final value.
     """
-    Tf = time[-1]
+    Tf = time[-1] - time[0]
     return np.concatenate((time-Tf, time[1:], time[1:] + Tf))
 
 
@@ -344,9 +374,9 @@ def get_pv_functions(time, trace, interp='pchip'):
 
         
 def shift_vol_func(vol_func, shift):
-    time = np.linspace(-1, 2, 1501)
+    time = np.linspace(0., 1., 1501)
     vol = vol_func(time - shift)
-    vol_func = interp1d(time, vol)
+    vol_func = get_pv_functions(time, vol, interp='linear')
     return vol_func
 
 
@@ -368,9 +398,8 @@ def shift_to_ed(pres_func, vol_func, edp, edv):
     return pres_func, vol_func
 
 
-def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valve_opening):
-#%%
-    time = np.linspace(valve_opening, 1.0, 201)
+def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valve_opening, Tc, valve_closing=0.0):
+    time = np.linspace(valve_opening, Tc, 201)  # Diastole
 
     pres_pv = pres_func(time)
     vol_pv = vol_func(time)
@@ -396,14 +425,15 @@ def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valv
     pres_func_pass = interp1d(time, pres_pv, kind='linear', fill_value='extrapolate')
 
     # Reconstruct the pressure function
-    time_before = np.linspace(0, valve_opening, 501)
+    time_before = np.linspace(valve_closing, valve_opening, 501)
     pres_before = pres_func(time_before)
-    time_after = np.linspace(valve_opening, 1.0, 501)
+    time_after = np.linspace(valve_opening, Tc + valve_closing, 501)
     pres_after = pres_func_pass(time_after)
 
-    pres_func_clipped = interp1d(np.concatenate((time_before, time_after)),
-                                 np.concatenate((pres_before, pres_after)),
-                                 kind='linear', fill_value='extrapolate')
+    time = np.concatenate((time_before, time_after))
+    pres = np.concatenate((pres_before, pres_after))
+
+    pres_func_clipped = get_pv_functions(time, pres, interp='linear')
     
     return pres_func_clipped
 #%%
@@ -596,9 +626,10 @@ def fix_systolic_aorta_pressure(time_aorta_pres, aorta_pres, ven_pres_func, ven_
     return time, aorta_pres
 
 
-def get_pv_loop(vol_time, vol_trace, valve_times, edp, sysp):
+def get_pv_loop(vol_time, vol_trace, valve_times, edp, sysp, side='lv'):
     norm_time, ref_pres, normalized_valve_times = load_reference_pressure_trace()
-    pressure, time_pressure = rescale_normalized_pressure_trace(norm_time, ref_pres, valve_times, normalized_valve_times, edp, sysp)
+    pressure, time_pressure = rescale_normalized_pressure_trace(norm_time, ref_pres, valve_times, 
+                                                                normalized_valve_times, edp, sysp, side)
     
     vol_func = interp1d(vol_time/np.max(vol_time), vol_trace, fill_value='extrapolate')
     vol_trace = vol_func(norm_time)
@@ -609,21 +640,17 @@ def get_pv_loop(vol_time, vol_trace, valve_times, edp, sysp):
     return norm_time, vol_trace, pres_trace
 
 
-def get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp):
-    if 'avo' in valve_times_shift:    # LV
-        avo_time = valve_times['avo'] + valve_times_shift['avo']
-        avc_time = valve_times['avc'] + valve_times_shift['avc']
-        mvo_time = valve_times['mvo'] + valve_times_shift['mvo']
-        valve_times = {'mvc': 0., 'avo': avo_time, 'avc': avc_time, 'mvo': mvo_time, 'tcycle': valve_times['tcycle']}
-    elif 'pvo' in valve_times_shift:  # RV
-        pvo_time = valve_times['pvo'] + valve_times_shift['pvo']
-        pvc_time = valve_times['pvc'] + valve_times_shift['pvc']
-        tvo_time = valve_times['tvo'] + valve_times_shift['tvo']
-        valve_times = {'tvc': 0., 'pvo': pvo_time, 'pvc': pvc_time, 'tvo': tvo_time, 'tcycle': valve_times['tcycle']}
+def get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side='lv'):
+    valve_times_updated = {}
+    for key in valve_times:
+        if key in valve_times_shift:
+            valve_times_updated[key] = valve_times[key] + valve_times_shift[key]
+        else:
+            valve_times_updated[key] = valve_times[key]
 
     time = np.linspace(0, 1, len(vol_trace))
 
-    norm_time, vol, pres = get_pv_loop(time, vol_trace, valve_times, edp, sysp)  
+    norm_time, vol, pres = get_pv_loop(time, vol_trace, valve_times_updated, edp, sysp, side=side) 
 
     ext_vol = repeat_traces(vol)
     ext_time = repeat_time(norm_time)
@@ -631,7 +658,7 @@ def get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift,
     vol_func = interp1d(ext_time, ext_vol, fill_value='extrapolate')
     vol = vol_func(time + vol_time_shift)
 
-    return vol, pres, valve_times
+    return vol, pres, valve_times_updated
 
 
 def compute_pv_area(x_coords, y_coords):
@@ -640,44 +667,57 @@ def compute_pv_area(x_coords, y_coords):
     return area
 
     
-def optimize_pv_area(vol_trace, valve_times, dt, edp, sysp, side='lv', dt_shift=1):
-    bounds = Bounds([-1.5*dt_shift*dt, -dt_shift*dt, -dt_shift*dt, -dt_shift*dt], [1.5*dt_shift*dt, dt_shift*dt, dt_shift*dt, dt_shift*dt])
-
+def optimize_pv_area(vol_trace, valve_times, dt, edp, sysp, side='lv', include_dias=True, dt_shift=1):
+    
     def func(x):
         vol_time_shift = x[0]
         if side == 'lv':
             valve_times_shift = {'avo': x[1], 'avc': x[2], 'mvo': x[3]}
-            lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp)
+            if include_dias:
+                valve_times_shift['ldias'] = -vol_time_shift
+            lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
             return -compute_pv_area(lv_vol, lv_pres)
         elif side == 'rv':
             valve_times_shift = {'pvo': x[1], 'pvc': x[2], 'tvo': x[3]}
-            rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp)
+            if include_dias:
+                valve_times_shift['rdias'] = -vol_time_shift
+            rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
             return -compute_pv_area(rv_vol, rv_pres)
 
     x0 = np.array([0., 0., 0., 0.])
+    bounds = Bounds([-1.5*dt_shift*dt, -dt_shift*dt, -dt_shift*dt, -dt_shift*dt], [1.5*dt_shift*dt, dt_shift*dt, dt_shift*dt, dt_shift*dt])
+
     sol = minimize(func, x0, method='trust-constr', bounds=bounds)
 
     # Generate the final volume and pressure traces after optimization
     vol_time_shift = sol.x[0]
     if side == 'lv':
         valve_times_shift = {'avo': sol.x[1], 'avc': sol.x[2], 'mvo': sol.x[3]}
-        lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp)
+        if include_dias:
+            valve_times_shift['ldias'] = -vol_time_shift
+        lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
         
         valve_times['avo'] = valve_times_shifted['avo']
         valve_times['avc'] = valve_times_shifted['avc']
         valve_times['mvo'] = valve_times_shifted['mvo']
+        if include_dias:
+            valve_times['ldias'] = valve_times_shifted['ldias']
 
-        return lv_vol, lv_pres, valve_times
+        return lv_vol, lv_pres, valve_times, vol_time_shift
     
     elif side == 'rv':
         valve_times_shift = {'pvo': sol.x[1], 'pvc': sol.x[2], 'tvo': sol.x[3]}
-        rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp)
+        if include_dias:
+            valve_times_shift['rdias'] = -vol_time_shift
+        rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
         
         valve_times['pvo'] = valve_times_shifted['pvo']
         valve_times['pvc'] = valve_times_shifted['pvc']
         valve_times['tvo'] = valve_times_shifted['tvo']
+        if include_dias:
+            valve_times['rdias'] = valve_times_shifted['rdias']
         
-        return rv_vol, rv_pres, valve_times
+        return rv_vol, rv_pres, valve_times, vol_time_shift
 
 
 def sbp_to_cbp(sbp, gender='F'):
@@ -706,7 +746,7 @@ def plot_pv_loop_traces(vol_func, pres_func, valve_times,
                         atrial_pres_func=None, 
                         aorta_pres_func=None, Tc=1.0):
     
-    time_pv = np.linspace(0, Tc, 1000)
+    time_pv = np.linspace(-Tc/10, Tc + Tc/10, 1000)
     pres_pv = pres_func(time_pv)
     vol_pv = vol_func(time_pv)
 
