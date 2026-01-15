@@ -399,7 +399,20 @@ def shift_to_ed(pres_func, vol_func, edp, edv):
 
 
 def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valve_opening, Tc, valve_closing=0.0):
-    time = np.linspace(valve_opening, Tc, 201)  # Diastole
+    # Find when the volume is max
+    time = np.linspace(0, Tc, 1001)
+    idx_vol_max = np.argmax(vol_func(time))
+    time_vol_max = time[idx_vol_max]
+    if time_vol_max > Tc/2:     # The max time is at the end, therefore, we prefer to just use valve_closing
+        time_vol_max = 0.0
+    add_time = np.max([valve_closing, time_vol_max])
+    time = np.linspace(valve_opening, Tc + add_time, 201)  # Diastole
+
+    # Find where ED is
+    idx_ed = len(time) - 1
+    if time_vol_max > valve_closing:
+        idx_ed = np.where(time >= Tc + valve_closing)[0][0]
+
 
     pres_pv = pres_func(time)
     vol_pv = vol_func(time)
@@ -412,22 +425,27 @@ def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valv
     pres_pv = pres_vol_pv(vol_pv)
     pres_pass = pres_vol_pass(vol_pv)
     where = np.where(pres_pass > pres_pv)[0]
-    if len(where) == 0:
-        # If no points are found, return the original pressure function
-        return pres_func
+    # if len(where) == 0:
+    #     # If no points are found, return the original pressure function
+    #     return pres_func
     
-    idx = where[0]
+    idx_init = where[0]
+    idx_end = where[-1]
+
+    # # # If the valve closing time is specified, ensure we do not go beyond that time
+    # if idx_end == len(time) - 1:
+    #     idx_end = idx_ed
 
     # For all the indices after the idx, we set the pressure to the pass pressure
-    pres_pv[idx:] = pres_pass[idx:]
-
+    pres_pv[idx_init:idx_end+1] = pres_pass[idx_init:idx_end+1]
+    
     # Reconstruct the pressure-volume function
     pres_func_pass = interp1d(time, pres_pv, kind='linear', fill_value='extrapolate')
 
     # Reconstruct the pressure function
-    time_before = np.linspace(valve_closing, valve_opening, 501)
+    time_before = np.linspace(add_time, valve_opening, 501)
     pres_before = pres_func(time_before)
-    time_after = np.linspace(valve_opening, Tc + valve_closing, 501)
+    time_after = np.linspace(valve_opening, Tc + add_time, 501)
     pres_after = pres_func_pass(time_after)
 
     time = np.concatenate((time_before, time_after))
@@ -436,6 +454,74 @@ def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valv
     pres_func_clipped = get_pv_functions(time, pres, interp='linear')
     
     return pres_func_clipped
+
+def clip_pv_loop_by_passive_v2(pres_func, vol_func, vol_passive, pres_passive, valve_opening, Tc, valve_closing=0.0):
+    #%%
+    # Find when the volume is max
+    time = np.linspace(0, Tc, 1001)
+    idx_vol_max = np.argmax(vol_func(time))
+    time_vol_max = time[idx_vol_max]
+    if time_vol_max > Tc/2:     # The max time is at the end, therefore, we prefer to just use valve_closing
+        time_vol_max = 0.0
+    add_time = np.max([valve_closing, time_vol_max])
+    time = np.linspace(add_time, Tc + add_time, 1001)  # Diastole
+
+    pres_pv_og = pres_func(time)
+    pres_pv = pres_func(time)
+    vol_pv = vol_func(time)
+
+    # Remove points outside the passive volume range
+    pres_vol_pv = interp1d(vol_pv, pres_pv, kind='linear', fill_value='extrapolate')
+    pres_vol_pass = interp1d(vol_passive, pres_passive, kind='linear', fill_value='extrapolate')
+
+    # Find indexes where the pass pressure  starts being greater than the PV pressure
+    pres_pv = pres_vol_pv(vol_pv)
+    pres_pass = pres_vol_pass(vol_pv)
+
+    # First pass, just change everythin that is below
+    where = np.where(pres_pass > pres_pv)[0]
+    # if len(where) == 0:
+    #     # If no points are found, return the original pressure function
+    #     return pres_func
+    
+    plt.plot(pres_pass)
+    plt.plot(pres_pv)
+    pres_pv[where] = pres_pass[where]
+
+
+    plt.plot(pres_pv)
+
+    # Second pass, look at diastole
+    idx_es = np.where(time >= valve_opening)[0][0]
+    pres_pv_diastole = pres_pv_og[idx_es:]
+    pres_pass_diastole = pres_pass[idx_es:]
+
+    where = np.where(pres_pass_diastole > pres_pv_diastole)[0]
+    if len(where) > 0:
+        idx_init = where[0] + idx_es
+        idx_end = where[-1] + idx_es
+
+        pres_pv[idx_init:idx_end] = pres_pass[idx_init:idx_end]
+
+    plt.plot(pres_pv)
+
+    # Reconstruct the pressure-volume function
+    pres_func_pass = interp1d(time, pres_pv, kind='linear', fill_value='extrapolate')
+
+    # Reconstruct the pressure function
+    time_before = np.linspace(add_time, valve_opening, 501)
+    pres_before = pres_func_pass(time_before)
+    time_after = np.linspace(valve_opening, Tc + add_time, 501)
+    pres_after = pres_func_pass(time_after)
+
+    time = np.concatenate((time_before, time_after))
+    pres = np.concatenate((pres_before, pres_after))
+
+    pres_func_clipped = get_pv_functions(time, pres, interp='linear')
+    
+    return pres_func_clipped
+
+    
 #%%
 
 def scale_atrial_pressure_magnitude(time_atrial_pres, atrial_pres, atrial_valve_times, ven_pres_func, ven_valve_times):
