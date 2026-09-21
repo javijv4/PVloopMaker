@@ -30,72 +30,66 @@ def check_traces(time, trace):
     tuple: A tuple containing the adjusted time and trace arrays.
     """
     if trace[0] != trace[-1]:
+        dt = time[1] - time[0]
         trace = np.concatenate((trace, trace[0:1]))
-        time = np.linspace(0, 1, len(trace))
+        time = np.concatenate((time, [time[-1] + dt]))
 
     return time, trace
 
 
-def check_volume_traces(vol_trace, shift_to_zero=True):
-    vol_trace_og = vol_trace.copy()
-    ext_vol_trace_og = np.concatenate((vol_trace_og[:-1], vol_trace_og, vol_trace_og[1:])) 
-    st_idx = len(vol_trace) - 1
-    ext_vol_trace = np.concatenate((vol_trace[:-1], vol_trace, vol_trace[1:])) 
+def check_volume_traces(vol_trace, shift_to_zero=True, ed_tol=0.02):
+    """Clean non-monotonic volume segments and optionally realign to ED.
 
-    # Find minimum and maximum values
+    When several samples sit near the maximum (ED plateau), ED is the *first*
+    index within ``ed_tol`` of the max (fraction of stroke volume), walking
+    circularly from the absolute peak, so the cycle does not start mid-plateau.
+    """
+    vol_trace = np.asarray(vol_trace, dtype=float).copy()
+    n = len(vol_trace)
+    st_idx = n - 1
+    ext_vol_trace = np.concatenate((vol_trace[:-1], vol_trace, vol_trace[1:]))
+
     min_vol = np.min(ext_vol_trace)
     max_vol = np.max(ext_vol_trace)
 
-    min_idx = np.where(ext_vol_trace == min_vol)[0]
-    max_idx = np.where(ext_vol_trace == max_vol)[0]
-    
-    # Grab the middle index for min and the closest two indices for max
-    min_idx = min_idx[1]
-    max_idxs = np.sort(max_idx[np.argsort(np.abs(max_idx - min_idx))[:2]])
+    # Unique period (drop duplicate closing sample if present)
+    closed = np.isclose(vol_trace[0], vol_trace[-1])
+    n_u = n - 1 if closed else n
+    v = vol_trace[:n_u]
+    tol = ed_tol * (np.max(v) - np.min(v))
+    near = v >= (np.max(v) - tol)
+    peak = int(np.argmax(v))
+
+    # First sample of the (possibly wrapped) ED plateau containing the peak
+    ed = peak
+    for _ in range(n_u - 1):
+        prev = (ed - 1) % n_u
+        if not near[prev]:
+            break
+        ed = prev
+
+    # Map to middle / next-cycle copies in the extended array
+    max0 = st_idx + ed
+    max1 = max0 + n_u
+    max_idxs = np.array([max0, max1])
     shift = max_idxs[0] - st_idx
 
-    # Decreasing trace
-    dec_trace = ext_vol_trace[max_idxs[0]:min_idx+1]
-    
-    # Find indices where dec_trace is not monotonically decreasing
-    non_decreasing_idx = np.where(np.diff(dec_trace) > 0)[0] + 1
+    # ES minimum that lies between the two ED landmarks
+    min_candidates = np.where(ext_vol_trace == min_vol)[0]
+    between = min_candidates[(min_candidates > max0) & (min_candidates < max1)]
+    min_idx = int(between[0]) if len(between) else int(min_candidates[1])
 
-    while len(non_decreasing_idx) > 0:
-        # Interpolate only over the valid (monotonically decreasing) points
-        valid_idx = np.setdiff1d(np.arange(len(dec_trace)), non_decreasing_idx)
-        interp_func = interp1d(valid_idx, dec_trace[valid_idx], kind='linear', fill_value='extrapolate')
-        dec_trace[non_decreasing_idx] = interp_func(non_decreasing_idx)
+    # Decreasing / increasing limbs; enforce monotonicity without moving ED/ES
+    dec_trace = np.minimum.accumulate(ext_vol_trace[max_idxs[0]:min_idx + 1].copy())
+    inc_trace = np.maximum.accumulate(ext_vol_trace[min_idx:max_idxs[1] + 1].copy())
 
-        # Recalculate non_decreasing_idx
-        non_decreasing_idx = np.where(np.diff(dec_trace) > 0)[0]
-
-    # Increasing trace
-    inc_trace = ext_vol_trace[min_idx:max_idxs[1]+1]
-
-    # Find indices where inc_trace is not monotonically increasing
-    non_increasing_idx = np.where(np.diff(inc_trace) < 0)[0] + 1
-
-    while len(non_increasing_idx) > 0:
-        # Interpolate only over the valid (monotonically increasing) points
-        valid_idx = np.setdiff1d(np.arange(len(inc_trace)), non_increasing_idx)
-        interp_func = interp1d(valid_idx, inc_trace[valid_idx], kind='linear', fill_value='extrapolate')
-        inc_trace[non_increasing_idx] = interp_func(non_increasing_idx)
-
-        # Recalculate non_increasing_idx
-        non_increasing_idx = np.where(np.diff(inc_trace) < 0)[0] + 1
-
-    # Combine the traces
     vol_trace = np.concatenate((dec_trace, inc_trace[1:]))
 
-    # # Shift back
     if shift_to_zero:
-        ext_vol_trace = np.concatenate((vol_trace[:-1], vol_trace, vol_trace[1:]))
-        vol_trace = ext_vol_trace[st_idx-shift:(st_idx+len(vol_trace)-shift)]
+        ext_out = np.concatenate((vol_trace[:-1], vol_trace, vol_trace[1:]))
+        vol_trace = ext_out[st_idx - shift:(st_idx + len(vol_trace) - shift)]
 
     return vol_trace, shift
-
-
-    
 
 
 def load_volume_traces(lv_vol_path, rv_vol_path=None, use_rv=False):
@@ -190,35 +184,157 @@ def load_aorta_pressure_trace(aorta_pres_path=None, use_ref_pres_aorta_trace=Tru
         time_aorta_pres, aorta_pres = check_traces(time_aorta_pres, aorta_pres)
         return time_aorta_pres, aorta_pres, Tcycle_pres
     
-def find_EA_peaks(flow_velocity):
+def find_EA_peaks(flow_velocity, plot=False, volume=None, time=None, title=None,
+                  figsize=(6.4, 4.8)):
+    """Find E/A filling peaks and the onset of the atrial kick.
+
+    Parameters
+    ----------
+    flow_velocity : array-like
+        Ventricular volume rate (dV/dt), e.g. ``np.gradient(volume)``.
+    plot : bool, optional
+        If True, show the flow (and optional volume) with EA landmarks.
+    volume : array-like, optional
+        Volume trace matching ``flow_velocity`` (plotted when ``plot=True``).
+    time : array-like, optional
+        Sample times; defaults to frame indices.
+    title : str, optional
+        Figure title when ``plot=True``.
+    figsize : tuple, optional
+        Figure size when ``plot=True``.
+
+    Returns
+    -------
+    Epeak, Apeak, lbE, lbA : int
+        Sample indices of the E peak, A peak, start of early filling,
+        and beginning of the atrial kick (last change in dV/dt slope).
+    """
     from scipy.signal import find_peaks
-    flow_velocity_aux = np.append(flow_velocity[-1], flow_velocity)  # To avoid edge effects
-    flow_velocity_aux = np.append(flow_velocity_aux, flow_velocity[0])
-    zero_crossings = np.where(np.diff(np.sign(flow_velocity_aux)))[0]
-    min_flow_idx = np.argmin(flow_velocity)
-    zero_crossings = zero_crossings[zero_crossings > min_flow_idx]
-    dia_start = zero_crossings[0]
 
-    peaks = []
-    prominence = 5  # Initial prominence threshold
-    while len(peaks) < 2:
-        peaks, props = find_peaks(flow_velocity_aux[dia_start:], prominence=prominence)
-        prominence = prominence * 0.9  # Decrease prominence threshold if not enough peaks found
+    flow = np.asarray(flow_velocity, dtype=float)
+    n = len(flow)
 
-    peaks = peaks + dia_start - 1  # Adjust indices to original array
-    peak_values = flow_velocity[peaks]
-    largest_indices = np.argsort(peak_values)[-2:]
-    order = np.argsort(largest_indices)
-    lbE = props['left_bases'][largest_indices[order[0]]] + dia_start - 1
-    lbA = props['left_bases'][largest_indices[order[1]]] + dia_start - 1
-    largest_peaks = peaks[largest_indices][order]
-    largest_peak_values = peak_values[largest_indices][order]
-    Epeak, Apeak = largest_peaks
-    Evalue = largest_peak_values[0]
-    Avalue = largest_peak_values[1]
-    # print("Peak E and A velocities (cm/s):", largest_peak_values)
-    # print("Peak times (s):", largest_peaks * timestep)
+    # Diastole starts at the first flow upcrossing after peak ejection
+    min_flow_idx = int(np.argmin(flow))
+    upcross = np.where((flow[:-1] <= 0) & (flow[1:] > 0))[0] + 1
+    upcross = upcross[upcross > min_flow_idx]
+    dia_start = int(upcross[0]) if len(upcross) else min_flow_idx
+
+    peaks, _ = find_peaks(flow[dia_start:])
+    if len(peaks) == 0:
+        peaks = np.array([int(np.argmax(flow[dia_start:]))])
+    peaks = peaks + dia_start
+
+    # E = first significant diastolic peak, A = last (not the two tallest:
+    # a mid-diastolic bump can outrank a smaller A-wave)
+    max_peak = np.max(flow[peaks])
+    significant = peaks[flow[peaks] >= 0.2 * max_peak]
+    if len(significant) == 0:
+        significant = peaks
+    Epeak = int(significant[0])
+    Apeak = int(significant[-1])
+    lbE = dia_start
+
+    # Atrial kick onset: last significant upstroke in dV/dt before the A peak.
+    accel = np.diff(flow)
+    late = accel[Epeak:Apeak] if Apeak > Epeak else accel[Epeak:]
+    if len(late) == 0 or np.max(late) <= 0:
+        lbA = Apeak
+    else:
+        above = np.where(late >= 0.3 * np.max(late))[0]
+        splits = np.where(np.diff(above) > 1)[0]
+        run_start = int(above[splits[-1] + 1] if len(splits) else above[0])
+        lbA = run_start + Epeak + 1
+
+    lbA = int(np.clip(lbA, 0, n - 1))
+
+    if plot:
+        t = np.asarray(time, dtype=float) if time is not None else np.arange(n)
+        n_axes = 2 if volume is not None else 1
+        height = figsize[1] if n_axes == 2 else figsize[1] / 2
+        fig, axes = plt.subplots(n_axes, 1, sharex=True, figsize=(figsize[0], height),
+                                 constrained_layout=True)
+        if n_axes == 1:
+            axes = [axes]
+
+        ax_flow = axes[0]
+        ax_flow.axhline(0, color='0.7', lw=0.8)
+        ax_flow.plot(t, flow, 'k.-', label='dV/dt')
+        ax_flow.plot(t[peaks], flow[peaks], 'o', color='0.6', markersize=5, label='all peaks')
+        other = significant[(significant != Epeak) & (significant != Apeak)]
+        if len(other):
+            ax_flow.plot(t[other], flow[other], 'o', color='tab:orange', markersize=6,
+                         label='significant')
+        ax_flow.plot(t[min_flow_idx], flow[min_flow_idx], 'v', color='tab:purple',
+                     markersize=8, label='min flow')
+        ax_flow.plot(t[Epeak], flow[Epeak], 'o', color='tab:green', markersize=9, label='E peak')
+        ax_flow.plot(t[Apeak], flow[Apeak], 'o', color='tab:red', markersize=9, label='A peak')
+        ax_flow.axvline(t[lbE], color='tab:green', ls='--', lw=1.2, label='lbE (early fill)')
+        ax_flow.axvline(t[lbA], color='tab:red', ls='--', lw=1.2, label='lbA (atrial kick)')
+        ax_flow.set_ylabel('dV/dt')
+        ax_flow.legend(frameon=False, fontsize=8, loc='best')
+        ax_flow.set_title(title if title else 'EA peak detection')
+
+        if volume is not None:
+            vol = np.asarray(volume, dtype=float)
+            ax_vol = axes[1]
+            ax_vol.plot(t, vol, 'k.-', label='volume')
+            ax_vol.plot(t[Epeak], vol[Epeak], 'o', color='tab:green', markersize=9, label='E peak')
+            ax_vol.plot(t[Apeak], vol[Apeak], 'o', color='tab:red', markersize=9, label='A peak')
+            ax_vol.axvline(t[lbE], color='tab:green', ls='--', lw=1.2, label='lbE')
+            ax_vol.axvline(t[lbA], color='tab:red', ls='--', lw=1.2, label='lbA')
+            ax_vol.set_ylabel('Volume')
+            ax_vol.legend(frameon=False, fontsize=8, loc='best')
+
+        axes[-1].set_xlabel('Time' if time is not None else 'Frame')
+
     return Epeak, Apeak, lbE, lbA
+
+
+def check_dias_landmarks(ldias, rdias, lv_vol, rv_vol):
+    """Ensure atrial-kick landmarks are closer to ED than ES.
+
+    Traces are assumed ED-aligned (ED at index 0) and closed (last sample
+    duplicates ED). If only one of ``ldias`` / ``rdias`` is nearer ES than ED,
+    copy the valid landmark to the bad side. If both are nearer ES, raise.
+
+    Parameters
+    ----------
+    ldias, rdias : int
+        Frame indices of LV / RV atrial-kick onset.
+    lv_vol, rv_vol : array-like
+        ED-aligned volume traces used to locate each side's ES.
+
+    Returns
+    -------
+    ldias, rdias : int
+        Corrected frame indices.
+    source : {'lv', 'rv'} or None
+        Side whose landmark was kept when the other was replaced; ``None``
+        if no correction was needed.
+    """
+    def _closer_to_es(idx, vol):
+        n = len(vol) - 1
+        es = int(np.argmin(vol[:n]))
+        i = int(idx) % n
+        d_ed = min(i, n - i)
+        d_es = min(abs(i - es), n - abs(i - es))
+        return d_es < d_ed
+
+    ldias_bad = _closer_to_es(ldias, lv_vol)
+    rdias_bad = _closer_to_es(rdias, rv_vol)
+    if ldias_bad and rdias_bad:
+        raise ValueError(
+            'Both ldias and rdias are closer to end-systole than ED; '
+            'atrial-kick landmarks are unreliable for this patient.')
+    source = None
+    if rdias_bad and not ldias_bad:
+        rdias = ldias
+        source = 'lv'
+    elif ldias_bad and not rdias_bad:
+        ldias = rdias
+        source = 'rv'
+    return int(ldias), int(rdias), source
 
 
 def add_iv_datapoints(time, trace, iv_dur_norm, max_or_min):
@@ -753,36 +869,90 @@ def compute_pv_area(x_coords, y_coords):
     return area
 
     
-def optimize_pv_area(vol_trace, valve_times, dt, edp, sysp, side='lv', include_dias=True, dt_shift=1):
-    
+def optimize_pv_area(vol_trace, valve_times, dt, edp, sysp, side='lv',
+                     include_dias=True, dt_shift=1, optimize_vol_shift=True,
+                     iso_vol_weight=0.0):
+    """Maximize PV-loop area by shifting valve times (and optionally the volume).
+
+    Parameters
+    ----------
+    optimize_vol_shift : bool
+        If True, also optimize a uniform time shift of the volume trace.
+        If False, the volume stays fixed and only valve events are adjusted.
+    iso_vol_weight : float
+        Weight on squared volume mismatches during isovolumetric intervals
+        (IVC: mvc–avo / tvc–pvo; IVR: avc–mvo / pvc–tvo). Objective is
+        ``-PV_area + iso_vol_weight * (dV_ivc**2 + dV_ivr**2)``.
+    """
+    import warnings
+
+    if side == 'lv':
+        ivc_pair = ('mvc', 'avo')
+        ivr_pair = ('avc', 'mvo')
+    else:
+        ivc_pair = ('tvc', 'pvo')
+        ivr_pair = ('pvc', 'tvo')
+
+    def _iso_penalty(vol, vt):
+        if iso_vol_weight == 0.0:
+            return 0.0
+        t = np.linspace(0, 1, len(vol))
+        vol_func = interp1d(t, vol, fill_value='extrapolate')
+        dv_ivc = vol_func(vt[ivc_pair[0]]) - vol_func(vt[ivc_pair[1]])
+        dv_ivr = vol_func(vt[ivr_pair[0]]) - vol_func(vt[ivr_pair[1]])
+        return iso_vol_weight * (dv_ivc ** 2 + dv_ivr ** 2)
+
     def func(x):
-        vol_time_shift = x[0]
+        if optimize_vol_shift:
+            vol_time_shift = x[0]
+            v1, v2, v3 = x[1], x[2], x[3]
+        else:
+            vol_time_shift = 0.0
+            v1, v2, v3 = x[0], x[1], x[2]
+
         if side == 'lv':
-            valve_times_shift = {'avo': x[1], 'avc': x[2], 'mvo': x[3]}
+            valve_times_shift = {'avo': v1, 'avc': v2, 'mvo': v3}
             if include_dias:
                 valve_times_shift['ldias'] = -vol_time_shift
-            lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
-            return -compute_pv_area(lv_vol, lv_pres)
-        elif side == 'rv':
-            valve_times_shift = {'pvo': x[1], 'pvc': x[2], 'tvo': x[3]}
+        else:
+            valve_times_shift = {'pvo': v1, 'pvc': v2, 'tvo': v3}
             if include_dias:
                 valve_times_shift['rdias'] = -vol_time_shift
-            rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
-            return -compute_pv_area(rv_vol, rv_pres)
 
-    x0 = np.array([0., 0., 0., 0.])
-    bounds = Bounds([-1.5*dt_shift*dt, -dt_shift*dt, -dt_shift*dt, -dt_shift*dt], [1.5*dt_shift*dt, dt_shift*dt, dt_shift*dt, dt_shift*dt])
+        vol, pres, vt_shifted = get_shift_pv_loop(
+            vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
+        return -compute_pv_area(vol, pres) + _iso_penalty(vol, vt_shifted)
 
-    sol = minimize(func, x0, method='trust-constr', bounds=bounds)
+    if optimize_vol_shift:
+        x0 = np.zeros(4)
+        lo = [-1.5 * dt_shift * dt, -dt_shift * dt, -dt_shift * dt, -dt_shift * dt]
+        hi = [1.5 * dt_shift * dt, dt_shift * dt, dt_shift * dt, dt_shift * dt]
+    else:
+        x0 = np.zeros(3)
+        lo = [-dt_shift * dt] * 3
+        hi = [dt_shift * dt] * 3
+    bounds = Bounds(lo, hi)
 
-    # Generate the final volume and pressure traces after optimization
-    vol_time_shift = sol.x[0]
+    # trust-constr + numpy 2.x emits benign UserWarnings (where/out, delta_grad)
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message="'where' used without 'out'")
+        warnings.filterwarnings('ignore', message='delta_grad == 0.0')
+        sol = minimize(func, x0, method='trust-constr', bounds=bounds)
+
+    if optimize_vol_shift:
+        vol_time_shift = sol.x[0]
+        v1, v2, v3 = sol.x[1], sol.x[2], sol.x[3]
+    else:
+        vol_time_shift = 0.0
+        v1, v2, v3 = sol.x[0], sol.x[1], sol.x[2]
+
     if side == 'lv':
-        valve_times_shift = {'avo': sol.x[1], 'avc': sol.x[2], 'mvo': sol.x[3]}
+        valve_times_shift = {'avo': v1, 'avc': v2, 'mvo': v3}
         if include_dias:
             valve_times_shift['ldias'] = -vol_time_shift
-        lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
-        
+        lv_vol, lv_pres, valve_times_shifted = get_shift_pv_loop(
+            vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
+
         valve_times['avo'] = valve_times_shifted['avo']
         valve_times['avc'] = valve_times_shifted['avc']
         valve_times['mvo'] = valve_times_shifted['mvo']
@@ -790,19 +960,20 @@ def optimize_pv_area(vol_trace, valve_times, dt, edp, sysp, side='lv', include_d
             valve_times['ldias'] = valve_times_shifted['ldias']
 
         return lv_vol, lv_pres, valve_times, vol_time_shift
-    
+
     elif side == 'rv':
-        valve_times_shift = {'pvo': sol.x[1], 'pvc': sol.x[2], 'tvo': sol.x[3]}
+        valve_times_shift = {'pvo': v1, 'pvc': v2, 'tvo': v3}
         if include_dias:
             valve_times_shift['rdias'] = -vol_time_shift
-        rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
-        
+        rv_vol, rv_pres, valve_times_shifted = get_shift_pv_loop(
+            vol_trace, vol_time_shift, valve_times, valve_times_shift, edp, sysp, side=side)
+
         valve_times['pvo'] = valve_times_shifted['pvo']
         valve_times['pvc'] = valve_times_shifted['pvc']
         valve_times['tvo'] = valve_times_shifted['tvo']
         if include_dias:
             valve_times['rdias'] = valve_times_shifted['rdias']
-        
+
         return rv_vol, rv_pres, valve_times, vol_time_shift
 
 
@@ -810,7 +981,8 @@ def sbp_to_cbp(sbp, gender='F'):
     """
     Converts systolic blood pressure (SBP) to central blood pressure (CBP).
     These regressions are based on the data from https://doi.org/10.1161/HYPERTENSIONAHA.107.105445.
-    This paper also has data: 10.1097/HJH.0000000000003743 but for teens
+    This paper also has data: 10.1097/HJH.0000000000003743 but for teens.
+    SBP and CBP are in mmHg. Slope is dimensionless (mmHg/mmHg); intercept is in mmHg.
     """
     
     if gender == 'F':
