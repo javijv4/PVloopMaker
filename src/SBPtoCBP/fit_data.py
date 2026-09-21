@@ -13,6 +13,8 @@ from scipy.stats import linregress
 men_data = np.loadtxt('men_data.csv', delimiter=',', skiprows=1)
 women_data = np.loadtxt('women_data.csv', delimiter=',', skiprows=1)
 
+# BP values are in mmHg. Fit: aortic BP = slope * brachial BP + intercept
+# Slope is dimensionless (mmHg/mmHg); intercept is in mmHg.
 men_aortaBP, men_brachialBP = men_data.T
 men_slope, men_intercept, men_r_value, men_p_value, men_std_err = linregress(men_brachialBP, men_aortaBP)
 print(f"Men, Slope: {men_slope}, Intercept: {men_intercept}, R^2: {men_r_value**2}")
