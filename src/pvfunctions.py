@@ -572,7 +572,6 @@ def clip_pv_loop_by_passive(pres_func, vol_func, vol_passive, pres_passive, valv
     return pres_func_clipped
 
 def clip_pv_loop_by_passive_v2(pres_func, vol_func, vol_passive, pres_passive, valve_opening, Tc, valve_closing=0.0):
-    #%%
     # Find when the volume is max
     time = np.linspace(0, Tc, 1001)
     idx_vol_max = np.argmax(vol_func(time))
@@ -582,49 +581,29 @@ def clip_pv_loop_by_passive_v2(pres_func, vol_func, vol_passive, pres_passive, v
     add_time = np.max([valve_closing, time_vol_max])
     time = np.linspace(add_time, Tc + add_time, 1001)  # Diastole
 
+    # Compare in time: do NOT remap P through V. During IVC/IVR volume is nearly
+    # constant, so interp1d(vol, pres) collapses the isovolumetric pressure rise.
     pres_pv_og = pres_func(time)
-    pres_pv = pres_func(time)
+    pres_pv = pres_pv_og.copy()
     vol_pv = vol_func(time)
-
-    # Remove points outside the passive volume range
-    pres_vol_pv = interp1d(vol_pv, pres_pv, kind='linear', fill_value='extrapolate')
     pres_vol_pass = interp1d(vol_passive, pres_passive, kind='linear', fill_value='extrapolate')
-
-    # Find indexes where the pass pressure  starts being greater than the PV pressure
-    pres_pv = pres_vol_pv(vol_pv)
     pres_pass = pres_vol_pass(vol_pv)
 
-    # First pass, just change everythin that is below
+    # First pass: raise any point below the passive curve
     where = np.where(pres_pass > pres_pv)[0]
-    # if len(where) == 0:
-    #     # If no points are found, return the original pressure function
-    #     return pres_func
-    
-    plt.plot(pres_pass)
-    plt.plot(pres_pv)
-    pres_pv[where] = pres_pass[where]
+    if len(where) > 0:
+        pres_pv[where] = pres_pass[where]
 
-
-    plt.plot(pres_pv)
-
-    # Second pass, look at diastole
+    # Second pass: contiguous diastolic clip from MVO onward
     idx_es = np.where(time >= valve_opening)[0][0]
-    pres_pv_diastole = pres_pv_og[idx_es:]
-    pres_pass_diastole = pres_pass[idx_es:]
-
-    where = np.where(pres_pass_diastole > pres_pv_diastole)[0]
+    where = np.where(pres_pass[idx_es:] > pres_pv_og[idx_es:])[0]
     if len(where) > 0:
         idx_init = where[0] + idx_es
         idx_end = where[-1] + idx_es
-
         pres_pv[idx_init:idx_end] = pres_pass[idx_init:idx_end]
 
-    plt.plot(pres_pv)
-
-    # Reconstruct the pressure-volume function
     pres_func_pass = interp1d(time, pres_pv, kind='linear', fill_value='extrapolate')
 
-    # Reconstruct the pressure function
     time_before = np.linspace(add_time, valve_opening, 501)
     pres_before = pres_func_pass(time_before)
     time_after = np.linspace(valve_opening, Tc + add_time, 501)
@@ -633,9 +612,7 @@ def clip_pv_loop_by_passive_v2(pres_func, vol_func, vol_passive, pres_passive, v
     time = np.concatenate((time_before, time_after))
     pres = np.concatenate((pres_before, pres_after))
 
-    pres_func_clipped = get_pv_functions(time, pres, interp='linear')
-    
-    return pres_func_clipped
+    return get_pv_functions(time, pres, interp='linear')
 
     
 #%%
